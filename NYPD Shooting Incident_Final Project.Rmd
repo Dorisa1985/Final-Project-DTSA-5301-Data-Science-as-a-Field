@@ -1,0 +1,369 @@
+---
+title: "NYPD Shooting Incident Data Analysis"
+author: "Doris Antoni"
+date: "2025-11-30"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE, 
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+```{css, echo=FALSE}
+/* CSS SEDERHANA UNTUK PERBAIKI SPACING */
+p {
+  line-height: 1.8;      /* Spasi antar baris dalam paragraf */
+  margin-bottom: 20px;   /* Spasi antar paragraf */
+}
+
+body {
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+}
+
+h1, h2, h3, h4 {
+  margin-top: 30px;
+  margin-bottom: 15px;
+}
+```
+
+
+## **Introduction**
+This analysis explores shooting incident data in New York City from 2006 to 2024. Data is sourced from the NYC Open Data Portal and collected by the NYPD.
+
+## **Data Import and Reproducibility**
+The data is imported directly from the the NYC Open Data Portal to ensure reproducibility:
+
+
+```{r load-packages}
+#Load Packages
+library(tidyverse) # Used in data import,cleaning, processing, visualizing,modeling
+library(lubridate) #used for work related to time and date
+library(janitor) #Used for column name cleaning
+```
+**Import Data**
+```{r import-data}
+# Define Data URL
+url<-"https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+
+nypd_shooting<-read_csv(url)
+
+```
+## **Data Cleaning and Transformation**
+
+
+**Summary of the Data Before Cleaning**
+```{r before data-cleaning}
+
+summary(nypd_shooting) 
+```
+**Data Cleaning and Transformation Process**
+```{r data-cleaning}
+nypd_shooting_clean<-nypd_shooting%>%
+  
+  #change column name to "snake_case" format
+  clean_names()%>% 
+  
+  # change date column from character to date format
+  mutate(
+  occur_date=mdy(occur_date), 
+  occur_year=year(occur_date), # add new column (year)
+  occur_month=month(occur_date,label = TRUE), # add new column (month)
+  occur_day=wday(occur_date,label = TRUE) # add new column (day's name)
+  )%>%
+    
+  # Change columns to structured categories (factor) format
+  mutate(
+  across(c(
+      # Geographical
+      boro, precinct, jurisdiction_code, location_desc,loc_of_occur_desc ,loc_classfctn_desc,
+      
+      # Perpetrator demographics
+       perp_age_group , perp_race, perp_sex ,
+      
+      # Victim demographics  
+      vic_age_group, vic_sex , vic_race ,
+      
+      # Flags
+      statistical_murder_flag
+    ), as.factor)
+  )%>%
+    
+#Remove unnecessary columns
+  select(-c(x_coord_cd ,y_coord_cd ,latitude,longitude ,lon_lat,incident_key  ))
+
+```
+**Summary of the Data After Cleaning and Transformation**
+```{r data-after cleaning}
+summary(nypd_shooting_clean)
+```
+## **Missing Values**
+
+**Convert Null data to NA**
+```{r Convert Null to NA}
+nypd_null_clean <- nypd_shooting_clean %>%
+  mutate(across(c(perp_age_group, perp_race, location_desc, perp_sex),
+                ~na_if(., "(null)")))
+```
+
+**Summary Before Missing data (NA)   Handling**
+```{r NA Summary}
+missing_data_summary<-nypd_null_clean%>%
+  summarise(across(everything(), ~sum(is.na(.))))%>%
+  pivot_longer(everything(),names_to = "variable",values_to = "missing_amount")%>%
+  mutate(missing_percentage=round((missing_amount/nrow(nypd_shooting_clean))*100,2))%>%
+  filter(missing_amount>0)
+
+missing_data_summary
+
+```
+
+### **Missing Data Handling Strategy:**
+
+From the initial analysis results, several data columns have quite a lot of missing data.  
+
+**A. Columns Deletion**
+
+**Columns removed:** `location_desc`, `loc_of_occur_desc`, `loc_classfctn_desc`  
+**Reason:** These columns have more than 50% missing data, so if they are still used, it will cause the analysis and models created to have poor quality.  
+
+**B. Categorical Imputation**
+
+**Imputed Columns:**  
+- `perp_age_group` → filled with "UNKNOWN"  
+- `perp_sex` → filled with "U" (Unknown)  
+- `perp_race` → filled with "UNKNOWN"  
+- `jurisdiction_code` → filled with "0"  
+
+**Reason:**  
+- This columns type are category format.  
+- The number of missing data in these columns are less than 40%.  
+- The blanks are labeled "unknown" and "0," which are already in the initial data category.  
+- If these columns are removed, there will be fewer columns available for analysis.  
+
+
+```{r NA-handling}
+# Missing Data Handler
+
+nypd_shooting_final<-nypd_null_clean%>%
+  #Columns with missing data > 50% ==> Deleted
+  select(-c(location_desc,loc_of_occur_desc,loc_classfctn_desc))%>%
+
+  #Change NA to Unknown Category (NA less than 40% and Unknown category available)
+   mutate(
+    perp_age_group = fct_explicit_na(perp_age_group, "UNKNOWN"),
+    perp_sex = fct_explicit_na(perp_sex, "U"),
+    perp_race = fct_explicit_na(perp_race, "UNKNOWN"),
+
+  #Change to 0 category (only 2 NA data)
+    jurisdiction_code = fct_explicit_na(jurisdiction_code, "0")
+  )
+```
+
+**Summary After NA Handling**
+```{r After NA-handling}
+summary(nypd_shooting_final)
+```
+**Verify no missing values**
+```{r Verify no missing values}
+sum(is.na(nypd_shooting_final))
+```
+## **Predictive Modeling: Annual Trend Analysis**  
+I created a simple model using linear regression. The goal of this model is to predict the number of shooting incidents based on the number of years of the incidents.  
+
+#### Model Specification  
+- **Type:** Simple Linear Regression  
+- **Dependent Variable:** Annual incident count  
+- **Independent Variable:** Year (2006-2024)  
+```{r Model -Linear Regression }
+# Calculate yearly incident
+yearly_counts <- nypd_shooting_final %>%
+  count(occur_year, name = "actual")
+
+# Create Linear Model
+model <- lm(actual ~ occur_year, data = yearly_counts)
+
+# Model Prediction
+yearly_counts$predicted <- predict(model)
+
+summary(model)
+```
+```{r Model -Plot }
+# Main plot
+ggplot(yearly_counts, aes(x = occur_year)) +
+  
+  # Trend line (model)
+  geom_line(aes(y = predicted), 
+            color = "blue", 
+            size = 1.2, 
+            alpha = 0.7,
+            linetype = "solid") +
+  
+  # Actual data points
+  geom_point(aes(y = actual), 
+             color = "red", 
+             size = 3,
+             shape = 19) +
+  
+  # Add value labels
+  geom_text(aes(y = actual, label = actual),
+            vjust = -0.8,
+            size = 3.2,
+            fontface = "bold") +
+  
+  # Title and labels
+  labs(
+    title = "NYPD Shooting Incidents: Actual Data vs Linear Model",
+    subtitle = "Blue line = Linear regression model | Red dots = Actual yearly counts",
+    x = "Year",
+    y = "Number of Incidents",
+    caption = paste("Model shows average decrease of", 
+                    round(abs(coef(model)[2]), 1),
+                    "incidents per year (2006-2024)")
+  ) +
+  
+  # X-axis ticks
+  scale_x_continuous(breaks = seq(2006, 2024, 3)) +
+  
+  # Simple theme
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray40"),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+#### Results  
+From this model, we can see that the number of shooting incidents will decrease by 36.03 incidents per year. However, this model only has an R² of 0.2688, so I conclude it is inaccurate. Many other factors influencing the number of shooting incidents need to be incorporated into the model to produce a better prediction model.  
+
+
+## **NYPD Shooting Incident Data Analysis: Visualization and Findings**  
+
+
+### **1. First Visualization: Shooting Incident Trends per Year**
+
+Line Graph: Trend in Number of Shooting Incidents (2006-2024)
+```{r Trend in Number of Shooting Visualization}
+trend_shooting<-nypd_shooting_final%>%
+  count(occur_year)%>%
+
+  ggplot(aes(x=occur_year,y=n))+
+  geom_line(color="red")+
+  geom_point(color="black")+
+  labs(
+  title="Trend Shooting Incidents in NYC (2006-2024)",
+      x = "Year",
+    y = "Number of Shooting Incidents"
+  ) +
+   theme_minimal() +
+  scale_x_continuous(breaks = seq(2006, 2024, 2) )
+
+print(trend_shooting)
+```
+
+#### **First Visualization Analysis**
+
+#### Identification of Chart Patterns
+
+Some of the analysis we can draw from the graph above is as follows:  
+- There was a decline in the rate of shooting incidents from 2006 to 2018.  
+- There was a fairly drastic increase from 2019 to 2021.  
+- From 2021 to 2024, shooting incidents in NYPD areas declined again.  
+
+#### Things That are in Questions:  
+
+- What strategies did the NYPD implement to reduce shooting incidents annually from 2006 to 2018?  
+- Why did shooting incidents rise again drastically from 2019 to 2021? What triggered this? This period was during the early stages of COVID-19.  
+- What has been done to further reduce the number of incidents between 2021 and 2024?  
+
+### **2. Second Visualization: Spatio-Temporal Heatmap of Shooting Incidents in NYC**
+
+<p style="margin-bottom: 20px;"></p>
+
+```{r Heat Map Visualization}
+borough_trend_plot <- nypd_shooting_final %>%
+  count(boro, occur_year) %>%
+  ggplot(aes(x = occur_year, y = boro, fill = n)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "red", name = "Incidents") +
+  labs(
+    title = "Shooting Incidents Heatmap: Borough vs Year",
+    subtitle = "Geographic and temporal patterns of gun violence",
+    x = "Year",
+    y = "Borough"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(2006, 2024, 2))
+
+print(borough_trend_plot)
+```
+```{r Incident Rangking}
+borough_incdent_shooting_ranking <- nypd_shooting_final %>%
+  count(boro) %>%
+  arrange(desc(n))
+
+print(borough_incdent_shooting_ranking)
+```
+#### **Second Visualization Analysis**
+
+- Brooklyn has the highest shooting incident rate in the NYPD area.  
+- The Bronx ranks second.  
+- Staten Island is the safest area in terms of shooting incidents in the NYPD area.  
+
+**Things become questions from this condition**  
+- Why are shootings so frequent in Brooklyn and the Bronx, while there are so few on Staten Island?  
+- What are the population and economic conditions in these five NYPD districts? Are there any inequalities?  
+
+
+## **LIMITATIONS, POTENTIAL BIASES, AND MITIGATION**  
+
+#### **LIMITATIONS**
+- **Lack of Socioeconomic Data**  
+The current data does not contain socioeconomic data for the five NYPD jurisdictions, so I cannot analyze the relationship between high shooting incident in certain areas and their socioeconomic conditions.
+- **Lack of Population Data**  
+Population data is also not available for each jurisdiction, so I cannot analyze the incidence rate relative to the population. 
+
+#### **POTENTIAL BIASES**  
+- **Bias in Incident Reporting**  
+It's possible that shooting incidents are not reported to the police, which could bias the actual number of incidents. For example, if public trust in the police in a particular area is low, the public may be reluctant to report shooting incidents to the police, resulting in them not being included in police data. 
+- **Bias in Perpetrator Demographics**  
+The large amount of data labeled "Unknown" regarding the perpetrator's age, gender, and race could introduce bias into demographic analysis of the perpetrator. 
+
+
+
+#### **PERSONAL BIASES AND MITIGATION ** 
+1. **Identified Personal Biases:**  
+- **Bias in Determining Causes**  
+The sudden spike in shooting incidents in 2020-2021 was directly attributed to the COVID-19 pandemic without considering other contributing factors.  
+
+2. **Applied Mitigation Strategies:**  
+
+- **Using Appropriate and Precise Language**  
+Avoid using causal language in the incident analysis because the data is not sufficiently complete and I cannot determine the exact cause. 
+- **Providing Follow-Up Recommendations**  
+I have included follow-up recommendations in this report to add population and socioeconomic data to enhance the analysis and reduce bias.
+
+## **Conclusion and Recommendations**  
+#### **Key Findings**  
+- **There are 3 phases of shooting incident trends in NYPD areas from 2006-2024**  
+ decline (2006-2018),  spike (2020-2021), and gradual recovery (2022-2024).  
+- **Brooklyn and the Bronx are the 2 areas with the largest number of shootings incident in the NYPD area**, accounting for 69% of all incidents.
+
+
+#### **Recommendations for Further Analysis**  
+-  Add population data to calculate the shooting incident rate against the population in each area.  
+-  Add socio-economic data to see its relationship to the number of incidents that occurred in each area.  
+
+
+
